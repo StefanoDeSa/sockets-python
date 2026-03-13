@@ -6,15 +6,18 @@ HOST = "0.0.0.0"
 PORT = 5000
 TIMEOUT = 10
 
-# Registro de nós: node_id -> timestamp do último heartbeat
 nodes = {}
-
-# Lock para evitar problemas de concorrência
 nodes_lock = threading.Lock()
 
 
+def log(msg):
+    """Log com timestamp"""
+    now = time.strftime("%H:%M:%S")
+    print(f"[{now}] {msg}")
+
+
 def get_active_nodes():
-    """Retorna lista de nós ativos (heartbeat nos últimos TIMEOUT segundos)"""
+    """Retorna lista de nós ativos"""
     current_time = time.time()
     active = []
 
@@ -26,36 +29,48 @@ def get_active_nodes():
     return active
 
 
+def monitor_expired_nodes():
+    """Thread que detecta nós expirados"""
+    while True:
+        current_time = time.time()
+
+        with nodes_lock:
+            for node_id, last_heartbeat in nodes.items():
+                if current_time - last_heartbeat > TIMEOUT:
+                    log(f"[EXPIRED] Nó {node_id} expirou")
+
+        time.sleep(1)
+
+
 def process_command(message):
-    """Processa comandos recebidos dos clientes"""
     message = message.strip()
 
-    # REGISTER
     if message.startswith("REGISTER:"):
         node_id = message.split(":", 1)[1]
 
         with nodes_lock:
             nodes[node_id] = time.time()
 
+        log(f"[REGISTER] Nó registrado: {node_id}")
+
         return "OK:REGISTERED"
 
-    # HEARTBEAT
     elif message.startswith("HEARTBEAT:"):
         node_id = message.split(":", 1)[1]
 
         with nodes_lock:
             if node_id in nodes:
                 nodes[node_id] = time.time()
+                log(f"[HEARTBEAT] Recebido de {node_id}")
                 return "OK:HEARTBEAT"
             else:
                 return "ERROR:NOT_REGISTERED"
 
-    # LIST
     elif message == "LIST":
         active_nodes = get_active_nodes()
+        log(f"[LIST] Nós ativos: {active_nodes}")
         return "NODES:" + ",".join(active_nodes)
 
-    # QUIT
     elif message.startswith("QUIT:"):
         node_id = message.split(":", 1)[1]
 
@@ -63,15 +78,17 @@ def process_command(message):
             if node_id in nodes:
                 del nodes[node_id]
 
+        log(f"[DISCONNECT] Nó removido: {node_id}")
+
         return "OK:BYE"
 
     else:
+        log(f"[ERROR] Comando desconhecido: {message}")
         return "ERROR:UNKNOWN_COMMAND"
 
 
 def handle_client(conn, addr):
-    """Thread que gerencia comunicação com um cliente"""
-    print(f"[CONNECTION] Cliente conectado: {addr}")
+    log(f"[CONNECTION] Cliente conectado: {addr}")
 
     try:
         while True:
@@ -81,22 +98,21 @@ def handle_client(conn, addr):
                 break
 
             message = data.decode().strip()
-            print(f"[RECEIVED] {message}")
+            log(f"[RECEIVED] {message}")
 
             response = process_command(message)
 
             conn.sendall((response + "\n").encode())
 
-            # encerra conexão após QUIT
             if response == "OK:BYE":
                 break
 
     except Exception as e:
-        print(f"[ERROR] {addr} -> {e}")
+        log(f"[ERROR] {addr} -> {e}")
 
     finally:
         conn.close()
-        print(f"[DISCONNECTED] {addr}")
+        log(f"[DISCONNECTED] {addr}")
 
 
 def main():
@@ -104,7 +120,11 @@ def main():
     server.bind((HOST, PORT))
     server.listen()
 
-    print(f"[STARTED] Servidor escutando em {HOST}:{PORT}")
+    log(f"[STARTED] Servidor escutando em {HOST}:{PORT}")
+
+    # thread de monitoramento
+    monitor_thread = threading.Thread(target=monitor_expired_nodes, daemon=True)
+    monitor_thread.start()
 
     while True:
         conn, addr = server.accept()
